@@ -1,27 +1,22 @@
-const $video = document.getElementById("video");
-const $canvas = document.getElementById("canvas");
-
-const ctx = $canvas.getContext("2d");
-let net = null;
-
-const glasses = new Image();
-glasses.src = "./glasses.webp";
-
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
 
-const GLASSES_WIDTH = 150;
-const GLASSES_HEIGHT = 75;
+const $videoCanvas = document.getElementById("video-canvas");
+$videoCanvas.width = VIDEO_WIDTH;
+$videoCanvas.height = VIDEO_HEIGHT;
 
-const getWebCam = async () => {
+const $graphicCanvas = document.getElementById("graphic-canvas");
+$graphicCanvas.width = VIDEO_WIDTH;
+$graphicCanvas.height = VIDEO_HEIGHT;
+
+const videoWorker = new Worker("./video-worker.js");
+
+async function createVideoFromWebcam() {
+  video = document.createElement("video");
+  video.autoplay = true;
+  video.controls = true;
+
   try {
-    net = await posenet.load({
-      architecture: "MobileNetV1",
-      outputStride: 16,
-      inputResolution: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
-      multiplier: 0.75,
-    });
-
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         width: VIDEO_WIDTH,
@@ -29,56 +24,59 @@ const getWebCam = async () => {
       },
     });
 
-    $video.addEventListener("loadeddata", () => requestAnimationFrame(render));
-    $video.srcObject = stream;
+    video.addEventListener("canplay", () => {
+      const imageCapture = new ImageCapture(stream.getVideoTracks()[0]);
 
-    $video.width = VIDEO_WIDTH;
-    $video.height = VIDEO_HEIGHT;
-    $canvas.width = VIDEO_WIDTH;
-    $canvas.height = VIDEO_HEIGHT;
+      function sendToWorker() {
+        imageCapture
+          .grabFrame()
+          .then((imageBitmap) => {
+            videoWorker.postMessage({ cmd: "RENDER", imageBitmap }, [
+              imageBitmap,
+            ]);
+          })
+          .catch((err) => err && console.error(err));
 
-    console.log("model loaded");
-  } catch (err) {
-    console.error(err);
-  }
-};
+        requestAnimationFrame(sendToWorker);
+      }
 
-const render = async () => {
-  try {
-    const { keypoints } = await net.estimateSinglePose(video, {
-      flipHorizontal: false,
+      requestAnimationFrame(sendToWorker);
     });
-    requestAnimationFrame(render);
 
-    const leftEye = keypoints[1];
-    const rightEye = keypoints[2];
-
-    const mid = [
-      (rightEye.position.x + leftEye.position.x) / 2,
-      (rightEye.position.y + leftEye.position.y) / 2,
-    ];
-
-    ctx.clearRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
-    ctx.save();
-    const angle = Math.atan2(
-      leftEye.position.y - rightEye.position.y,
-      leftEye.position.x - rightEye.position.x
-    );
-
-    ctx.translate(mid[0], mid[1]);
-    ctx.rotate(angle);
-    ctx.drawImage(
-      glasses,
-      -GLASSES_WIDTH / 2,
-      -GLASSES_HEIGHT / 2,
-      GLASSES_WIDTH,
-      GLASSES_HEIGHT
-    );
-
-    ctx.restore();
+    video.srcObject = stream;
   } catch (err) {
     console.error(err);
   }
-};
+}
 
-getWebCam();
+async function init() {
+  try {
+    const videoOffscreen = $videoCanvas.transferControlToOffscreen();
+    const graphicOffscreen = $graphicCanvas.transferControlToOffscreen();
+
+    const glasses = new Image();
+
+    glasses.onload = (e) => {
+      createImageBitmap(glasses).then((bmp) => {
+        videoWorker.postMessage(
+          {
+            cmd: "READY",
+            videoCanvas: videoOffscreen,
+            graphicCanvas: graphicOffscreen,
+            width: VIDEO_WIDTH,
+            height: VIDEO_HEIGHT,
+            glasses: bmp,
+          },
+          [videoOffscreen, graphicOffscreen, bmp]
+        );
+      });
+    };
+    glasses.src = "./glasses.webp";
+
+    await createVideoFromWebcam();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+init();
